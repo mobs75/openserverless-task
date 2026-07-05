@@ -1,0 +1,17 @@
+Section:
+  ops spark
+
+Usage:
+  spark enable
+  spark disable
+  spark status
+  spark test
+  spark pipeline-test
+
+Commands:
+  spark enable        enable the Spark operator and deploy the SparkJob CRD
+  spark disable       disable the Spark operator
+  spark status        show the status of the Spark operator and running jobs
+  spark test          run a quick SparkPi smoke test via spark-submit
+  spark pipeline-test run the full end-to-end pipeline test
+

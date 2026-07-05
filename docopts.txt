@@ -5,6 +5,7 @@ OpenServerless Tasks:
   setup       Setup the Apache OpenServerless platform on multiple environments
   util        Utilities
 
+  spark       Manage the Apache OpenServerless Spark operator
 OpenWhisk Tasks:
   action      Manage actions
   invoke      Invoke an action (pass parameters with <key>=<value>)

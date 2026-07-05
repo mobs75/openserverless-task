@@ -1,0 +1,50 @@
+version: '3'
+tasks:
+  enable:
+    desc: enable the Spark operator and deploy the SparkJob CRD
+    silent: true
+    cmds:
+      - config OPERATOR_COMPONENT_SPARK=true
+      - echo "Spark operator enabled. Run 'ops setup kubernetes apply' to apply."
+
+  disable:
+    desc: disable the Spark operator
+    silent: true
+    cmds:
+      - config OPERATOR_COMPONENT_SPARK=false
+      - echo "Spark operator disabled. Run 'ops setup kubernetes apply' to apply."
+
+  status:
+    desc: show the status of the Spark operator and running jobs
+    silent: true
+    cmds:
+      - |
+          echo "=== Spark Pods ==="
+          kubectl -n nuvolaris get pods | grep -E "spark|NAME" || true
+          echo ""
+          echo "=== SparkJobs ==="
+          kubectl -n nuvolaris get sparkjob 2>/dev/null || echo "No SparkJobs found"
+          echo ""
+          echo "=== spark-history-pvc ==="
+          kubectl -n nuvolaris get pvc spark-history-pvc 2>/dev/null || echo "PVC not found"
+          echo ""
+          echo "=== Watcher/Reconciler ==="
+          kubectl -n nuvolaris get deployment spark-watcher 2>/dev/null || true
+          kubectl -n nuvolaris get cronjob spark-reconciler 2>/dev/null || true
+
+  test:
+    desc: run a quick SparkPi smoke test via spark-submit
+    silent: true
+    cmds:
+      - |
+          kubectl -n nuvolaris delete job spark-pi-submit-test --ignore-not-found
+          kubectl apply -f $OPS_ROOT/../olaris-op/tests/spark/test-sparkpi-submit.yaml
+          kubectl -n nuvolaris wait --for=condition=complete job/spark-pi-submit-test --timeout=120s
+          POD=$(kubectl -n nuvolaris get pod -l job-name=spark-pi-submit-test -o jsonpath='{.items[0].metadata.name}')
+          kubectl -n nuvolaris logs $POD | grep -i "pi is roughly"
+
+  pipeline-test:
+    desc: run the full end-to-end pipeline test
+    silent: true
+    cmds:
+      - /snap/bin/task -d /home/mobs75/workspace/pr/openserverless-fork/olaris-op spark:pipeline-test
