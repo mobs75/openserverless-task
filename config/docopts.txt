@@ -2,7 +2,7 @@ Section:
   ops config
 
 Usage:
-  config (enable|disable) [--all] [--redis] [--mongodb] [--minio] [--cron] [--static] [--postgres] [--prometheus] [--slack] [--mail] [--affinity] [--tolerations] [--quota]  
+  config (enable|disable) [--all] [--redis] [--mongodb] [--minio] [--cron] [--static] [--postgres] [--prometheus] [--slack] [--mail] [--affinity] [--tolerations] [--quota] [--spark]
   config apihost (<apihost>|auto) [--tls=<email>] [--protocol=<http/https>|auto]
   config runtimes [<runtimesjson>]  
   config slack [--apiurl=<slackapiurl>] [--channel=<slackchannel>]
@@ -77,3 +77,4 @@ Options:
   --s3                  activate s3 compatible ingress on components supporting it
   --console             activate a s3console ingress on components supporting it (Currently MINIO)
   --quota               select quota checker module
+  --spark               select Spark operator
