@@ -1,0 +1,229 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+version: '3'
+
+vars:
+  D: ""
+  RUN: '{{if eq .D ""}}{{else}}echo{{end}}'
+  CAT: '{{if eq .D ""}}true{{else}}cat{{end}}'
+  OS: '{{OS}}'
+  ARCH: '{{ARCH}}'
+
+tasks:
+  check-ports:
+    desc: "Check if an array of TCP/UDP ports is free and fail if any are in use"
+    silent: true
+    vars:
+      PORTS: "{{ .PORTS | default \"\" }}"
+    cmds:
+      - |
+        {{if eq OS "windows"}}
+        $ports = "{{ .PORTS }}".Split(" ")
+        foreach ($entry in $ports) {
+          $parts = $entry -split "/"
+          $port = $parts[0]
+          $protocol = $parts[1].ToLower()
+
+          if ($protocol -eq "tcp" -and (Get-NetTCPConnection -LocalPort $port -ErrorAction SilentlyContinue)) {
+            Write-Host "TCP Port $port is in use!" -ForegroundColor Red
+            exit 1
+          }
+          if ($protocol -eq "udp" -and (Get-NetUDPEndpoint -LocalPort $port -ErrorAction SilentlyContinue)) {
+            Write-Host "UDP Port $port is in use!" -ForegroundColor Red
+            exit 1
+          }
+        }
+        {{else if eq OS "darwin"}}
+        for entry in {{ .PORTS }}; do
+          port="${entry%/*}"
+          protocol="${entry#*/}"
+          if [[ "$protocol" == "tcp" ]] && lsof -i TCP:$port -sTCP:LISTEN -t > /dev/null 2>&1; then
+            echo "TCP Port $port is in use!" >&2
+            exit 1
+          fi
+          if [[ "$protocol" == "udp" ]] && lsof -i UDP:$port -t > /dev/null 2>&1; then
+            echo "UDP Port $port is in use!" >&2
+            exit 1
+          fi
+        done
+        {{else}}
+        for entry in {{ .PORTS }}; do
+          port="${entry%/*}"
+          protocol="${entry#*/}"
+          if [[ "$protocol" == "tcp" ]] && ss -tuln | rg -q ":(^| )$port "; then
+            echo "TCP Port $port is in use!" >&2
+            exit 1
+          fi
+          if [[ "$protocol" == "udp" ]] && ss -uln | rg -q ":(^| )$port "; then
+            echo "UDP Port $port is in use!" >&2
+            exit 1
+          fi
+        done
+        {{end}}
+
+
+  mini:
+    silent: true
+    desc: install miniops
+    vars:
+       APIHOST: '{{or ._apihost_ "http://miniops.me"}}'
+    cmds:
+      - echo '{{.APIHOST}}' | rg 'https?://(?:[a-zA-Z0-9-]+\.)+[a-zA-Z]+/?' >/dev/null || die "please spefify an accessibile http://host"
+      - task: _mini
+        vars:
+          APIHOST: '{{.APIHOST}}'
+          PROTO:
+            sh:  echo '{{.APIHOST}}' | rg -o '(https?)://' -r '$1'
+          DOMAIN:
+            sh:  echo '{{.APIHOST}}' | rg -o 'https?://((?:[a-zA-Z0-9-]+\.)+[a-zA-Z]+)/?' -r '$1'
+
+  _mini:
+    silent: true
+    cmds:
+      - echo APIHOST={{.APIHOST}}
+      - echo PROTO={{.PROTO}}
+      - echo DOMAIN={{.DOMAIN}}
+      - docker -v || die "Docker is not installed. Please install Docker Desktop first."
+      - docker info 2>/dev/null >/dev/null || die "Docker is not running. Please start Docker Desktop first."
+      - |
+        if test -z {{.__skip_check_cluster}}
+        then
+          if curl -sL {{.APIHOST}} >/dev/null 2>/dev/null
+          then
+            if curl -sL {{.APIHOST}}/api/info 2>/dev/null | jq  -r .description 2>/dev/null | rg OpenWhisk >/dev/null 2>/dev/null
+            then
+              echo "*** Apache OpenServerless mini is already installed."
+              echo "*** Login with: ops ide login devel {{.APIHOST}}"
+              echo "*** You can find the password in .ops/devel.password in your home directory"
+              echo "*** You can can uninstall and restart with: ops setup docker delete"
+              exit 1
+            else
+              if ! kind get clusters | rg nuvolaris
+              then echo "*** Something is already running as a local webserver, please remove it before installing miniops."
+                  exit 1
+              fi
+            fi
+          fi
+        fi
+      - ops setup docker check-space
+      - ops config slim
+      - ops config apihost '{{.DOMAIN}}' --protocol={{.PROTO}}
+      - ops setup devcluster
+      - ops setup nuvolaris add-user
+      - ops setup nuvolaris streamer deploy
+      - ops setup nuvolaris system-api deploy
+
+  devcluster:
+    vars:
+      PORTS: '9010/tcp 9080/tcp 30379/tcp 32817/tcp 3232/tcp 3233/tcp 9644/tcp 7896/tcp 5984/tcp 9092/tcp 9000/tcp 9090/tcp 19530/tcp 9091/tcp, 27017/tcp 80/tcp 443/tcp 57817/tcp'
+    silent: true
+    cmds:
+    - |
+      if {{.__status}}
+      then  {{.RUN}} ops setup docker status
+      elif  {{.__uninstall}}
+      then  {{.RUN}} ops setup docker delete
+      else
+        if test -z {{.__skip_check_ports}}
+        then
+          task check-ports PORTS="{{ .PORTS }}"
+        fi
+        {{.RUN}} ops setup docker create
+        {{.RUN}} ops setup kubernetes create
+        {{.RUN}} ops setup nuvolaris login
+        config STATUS_LAST=devcluster
+      fi
+
+  cluster:
+    silent: true
+    cmds:
+    - |
+      if {{.__status}}
+      then  {{.RUN}} ops setup kubernetes status CONTEXT="{{._context_}}"
+      elif  {{.__uninstall}}
+      then  {{.RUN}} ops setup kubernetes delete CONTEXT="{{._context_}}"
+      else
+            {{.RUN}} ops setup kubernetes create CONTEXT="{{._context_}}"
+            {{.RUN}} ops setup nuvolaris login
+            config STATUS_LAST=cluster
+            if test -n "{{._context_}}"
+            then config STATUS_CONTEXT="{{._context_}}"
+            fi
+      fi
+
+  server:
+    silent: true
+    cmds:
+    - |
+      if {{.__status}}
+      then {{.RUN}} ops cloud k3s status {{._server_}} {{._user_}}
+      elif {{.__uninstall}}
+      then  {{.RUN}} ops cloud k3s delete {{._server_}} {{._user_}}
+      else
+          {{.RUN}} ops cloud k3s create {{._server_}} {{._user_}}
+          {{.RUN}} ops setup kubernetes create
+          {{.RUN}} ops setup nuvolaris login
+          config STATUS_LAST=server STATUS_SERVER="{{._server_}}"
+          if test -n "{{._user_}}"
+          then config STATUS_USERNAME="{{._user_}}"
+          fi
+      fi
+
+  status:
+    silent: true
+    cmds:
+      - |
+        case "$STATUS_LAST" in
+        (devcluster) {{.RUN}} ops setup devcluster --status ;;
+        (cluster)    {{.RUN}} ops setup cluster "$STATUS_CONTEXT" --status ;;
+        (server)     {{.RUN}} ops setup server "$STATUS_SERVER" "$STATUS_USERNAME" --status ;;
+        (*) echo nothing installed yet
+        esac
+
+  uninstall:
+    silent: true
+    cmds:
+      - |
+        case "$STATUS_LAST" in
+        (devcluster)
+          {{.RUN}} ops setup devcluster --uninstall
+          config -r STATUS_LAST
+        ;;
+        (cluster)
+          if test -n "$STATUS_CONTEXT"
+          then
+              {{.RUN}} ops setup cluster "$STATUS_CONTEXT" --uninstall
+              config -r STATUS_CONTEXT
+          else
+              {{.RUN}} ops setup cluster --uninstall
+          fi
+          config -r STATUS_LAST
+        ;;
+        (server)
+          if test -z "$STATUS_USERNAME"
+          then
+                {{.RUN}} ops setup server "$STATUS_SERVER" --uninstall
+          else
+                {{.RUN}} ops setup server "$STATUS_SERVER" "$STATUS_USERNAME" --uninstall
+                config -r STATUS_USERNAME
+          fi
+          config -r STATUS_LAST STATUS_SERVER
+        ;;
+        (*) echo nothing installed yet
+        esac
+

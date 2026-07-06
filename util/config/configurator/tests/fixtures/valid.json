@@ -1,0 +1,11 @@
+{
+  "HELLO": {
+    "type": "string"
+  },
+  "HELLO3": {
+    "type": "string"
+  },
+  "ANOTHER": {
+    "type": "string"
+  }
+}

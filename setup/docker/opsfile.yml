@@ -1,0 +1,163 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+version: '3'
+
+vars:
+  CLUSTER: nuvolaris
+  INGRESS: "https://raw.githubusercontent.com/kubernetes/ingress-nginx/main/deploy/static/provider/kind/deploy.yaml"
+  HOMEDIR:
+    sh: echo ~ | replace --stdin -s \\ -r /
+
+env:
+  DATADIR:
+    sh: echo "$OPS_TMP/kind" | replace --stdin -s \\ -r /
+  WORKSPACE:
+    sh: echo "{{.HOMEDIR}}/.ops-workspace"
+  KUBECONFIG:
+    sh: |-
+        if test -e "$OPS_TMP/kubeconfig"
+        then echo "$OPS_TMP/kubeconfig"
+        else echo ~/.kube/config
+        fi
+
+tasks:
+  status:
+    silent: true
+    desc: status of the Apache OpenServerless cluster in Docker
+    cmds:
+    - |
+      if kind get clusters | rg {{.CLUSTER}}
+      then echo Cluster Apache OpenServerless up and running
+      else echo Cluster Apache OpenServerless not found
+      fi
+
+  info:
+    silent: true
+    desc: info the Apache OpenServerless cluster in Docker
+    cmds:
+    - |
+      echo "=== KUBECONFIG"
+      echo $KUBECONFIG
+      echo "=== Kind Version"
+      kind version
+      echo "=== Kind Clusters"
+      kind get clusters
+      if test -e $KUBECONFIG
+      then  echo "=== Nodes"
+            kubectl get nodes
+      fi
+
+
+  mkdir:
+    silent: true
+    cmds:
+    - echo "Creating data dir $DATADIR"
+    - echo "Creating workspace dir $WORKSPACE"
+    - mkdir -p "$DATADIR" "$WORKSPACE"
+
+  cluster:
+    silent: true
+    cmds:
+    - task: mkdir
+    - envsubst -i kind.yaml -o _kind.yaml
+    - >
+      kind create cluster
+      --wait=2m --name=nuvolaris
+      --config=_kind.yaml
+    - |
+      docker exec nuvolaris-control-plane mkdir -p /etc/containerd/certs.d/127.0.0.1:32000
+      docker exec nuvolaris-control-plane sh -c 'cat > /etc/containerd/certs.d/127.0.0.1:32000/hosts.toml << EOF
+      server = "http://127.0.0.1:32000"
+
+      [host."http://127.0.0.1:32000"]
+        capabilities = ["pull", "resolve", "push"]
+        skip_verify = true
+      EOF'
+      docker exec nuvolaris-control-plane systemctl restart containerd
+      kind export kubeconfig -n nuvolaris --kubeconfig "$OPS_TMP/kubeconfig"
+    - task: wait-kube
+
+  wait-kube:
+    silent: true
+    desc: wait kubeconfig
+    cmds:
+    - |
+      while ! test -e $OPS_TMP/kubeconfig
+      do echo waiting  kubeconfig
+         sleep 1
+      done
+    - retry kubectl --kubeconfig $OPS_TMP/kubeconfig cluster-info
+
+
+  ingress:
+    silent: true
+    cmds:
+    - >
+      retry kubectl --kubeconfig="$OPS_TMP/kubeconfig"
+      apply -f ingress-deploy.yaml
+
+  check-space:
+    silent: true
+    env:
+      REQUIRED_CPU: '{{ or .REQUIRED_CPU "4" }}'
+      REQUIRED_MEM: '{{ or .REQUIRED_MEM "14" }}'
+      REQUIRED_DISK: '{{or .REQUIRED_DISK "60" }}'
+    desc: check if the user has the minimum required disk space
+    cmds:
+      - bun run space.ts
+
+  clean-all:
+    silent: true
+    desc: remove all images and containers from docker
+    prompt: Are you sure? This will remove all images, containers and volumes from docker
+    cmds:
+    - echo "Cleaning all docker images and containers"
+    - docker ps -qa | while read a ; do docker rm -f "$a" ; done
+    - docker images -qa | while read a ; do docker rmi -f "$a" ; done
+    - docker system prune -af
+    - docker volume prune -af
+    - docker system df
+
+  create:
+    silent: true
+    desc: create the Apache OpenServerless cluster in Docker
+    cmds:
+      - |
+        if  kind get clusters | rg {{.CLUSTER}}
+        then kind export kubeconfig --name {{.CLUSTER}} --kubeconfig "$OPS_TMP/kubeconfig"
+        else
+          ops util freeze docker-load
+          test -n "{{.NO_KIND_PRELOAD}}" || ops util freeze kind-preload
+          ops setup docker cluster
+          ops util freeze kind-load
+          ops setup docker ingress
+        fi
+      - cp "$OPS_TMP/kubeconfig" "$OPS_TMP/kind-{{.CLUSTER}}.kubeconfig"
+
+  delete:
+    silent: true
+    desc: destroy the Apache OpenServerless cluster in Docker
+    cmds:
+    - kind delete clusters {{.CLUSTER}}
+    - rm -f "$OPS_TMP/kubeconfig" "$OPS_TMP/kind-{{.CLUSTER}}.kubeconfig"
+
+  kubeconfig:
+    desc: export kubeconfig
+    silent: true
+    cmds:
+    - kind export kubeconfig --name=nuvolaris --kubeconfig "$OPS_TMP/kubeconfig"
+    - cp "$OPS_TMP/kubeconfig" "$OPS_TMP/kind.kubeconfig"

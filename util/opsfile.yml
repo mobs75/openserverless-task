@@ -6,46 +6,293 @@ vars:
   ARC: '{{if eq .OS "windows"}}.zip{{else}}.tar.gz{{end}}'
   EXE: '{{if eq .OS "windows"}}.exe{{else}}{{end}}'
   DRY: ""
+  APIHOST:
+    sh: |
+      if test -z "$APIHOST"
+      then
+        wsk property get --apihost | awk '/whisk API host/{print $4}'
+      else
+        echo $APIHOST
+      fi
+  AUTH:
+    sh: |
+      if test -z "$AUTH"
+      then
+        wsk property get --apihost | awk '/whisk API auth/{print $4}'
+      else
+        echo $AUTH
+      fi
+  # unused
+  #USERNAME:
+  #  sh: |
+  #    wsk property get --namespace | awk '{ print $3 }'
 
 tasks:
+  config:
+    desc: Interactive OpenServerless Configuration Tool
+    silent: true
+    cmds:
+      - |
+        FLAGS=""
+        if {{.__showhelp}}
+        then FLAGS="$FLAGS --showhelp"
+        fi
+        if {{.__override}}
+        then FLAGS="$FLAGS --override"
+        fi
+        bun config/configurator.js $(opspath {{._configjson_}}) $FLAGS
 
   system:
     desc: system info
     silent: true
     cmds:
-    - echo "{{OS}}-{{ARCH}}"
+      - echo "{{OS}}-{{ARCH}}"
+
+  whoami:
+    desc: current user/namespace
+    silent: true
+    cmds:
+      - ops -wsk property get | awk '/whisk namespace/{print $3}'
+
+  apihost:
+    desc: current apihost
+    silent: true
+    cmds:
+      - ops -wsk property get | awk '/whisk API host/{print $4}'
 
   update-cli:
     desc: update CLI
     silent: true
     vars:
-       BASE: "https://github.com/apache/openserverless-cli/releases/download"
-       VER:
+      BASE: "https://github.com/apache/openserverless-cli/releases/download"
+      VER:
         sh: jq .version -r $OPS_ROOT/opsroot.json
-       URL: "{{.BASE}}/v{{.VER}}/openserverless-cli_{{.VER}}_{{.OS}}_{{.ARCH}}{{.ARC}}"
-       FILE: "{{base .URL}}"
+      URL: "{{.BASE}}/v{{.VER}}/openserverless-cli_{{.VER}}_{{.OS}}_{{.ARCH}}{{.ARC}}"
+      FILE: "{{base .URL}}"
     cmds:
-    - echo "Trying to update ops..."
-    - curl -sL "{{.URL}}" -o "$OPS_TMP/{{.FILE}}"
-    - |
-      cd "$OPS_TMP"
-      extract "{{.FILE}}" "ops{{.EXE}}"
-    - |
-      if test -z "$OPS_SKIP_UPDATE_CLI"
-      then
-        if rename "$OPS_TMP/ops{{.EXE}}" "$OPS_CMD"
-        then echo "ops updated!"
-        else echo "cannot auto update ops - update it manually"
-             echo "please run 'curl -sL bit.ly/get-ops | bash'"
+      - echo "Trying to update ops..."
+      - curl -sL "{{.URL}}" -o "$OPS_TMP/{{.FILE}}"
+      - |
+        cd "$OPS_TMP"
+        extract "{{.FILE}}" "ops{{.EXE}}"
+      - |
+        if test -z "$OPS_SKIP_UPDATE_CLI"
+        then
+          if rename "$OPS_TMP/ops{{.EXE}}" "$OPS_CMD"
+          then echo "ops updated!"
+          else echo "cannot auto update ops - update it manually"
+               echo "please run 'curl -sL bit.ly/get-ops | bash'"
+          fi
+        else
+          echo "skipping rename $OPS_TMP/ops{{.EXE}} $OPS_CMD"
         fi
-      else 
-        echo "skipping rename $OPS_TMP/ops{{.EXE}} $OPS_CMD"
-      fi
-
 
   check-operator-version:
     desc: check running operator version and warns it is obsolete (TODO)
     silent: true
     cmds:
-    - echo "TODO checking the running operator version"
+      - echo "TODO checking the running operator version" && exit 1
+
+  secrets:
+    desc: generate secrets
+    silent: true
+    cmds:
+      - config SECRET_OPENWHISK_SYSTEM="$(random --uuid):$(random --str 64)" SECRET_OPENWHISK_NUVOLARIS="$(random --uuid):$(random --str 64)"
+      - config SECRET_COUCHDB_ADMIN="$(random --str 12)" SECRET_COUCHDB_CONTROLLER="$(random --str 12)"  SECRET_COUCHDB_INVOKER="$(random --str 12)"
+      - config SECRET_REDIS_DEFAULT="$(random --str 12)" SECRET_REDIS_NUVOLARIS="$(random --str 12)"
+      - config SECRET_MONGODB_ADMIN="$(random --str 12)" SECRET_MONGODB_NUVOLARIS="$(random --str 12)"
+      - config SECRET_MINIO_ADMIN="$(random --str 40)" SECRET_MINIO_NUVOLARIS="$(random --str 40)"
+      - config SECRET_POSTGRES_ADMIN="$(random --str 12)" SECRET_POSTGRES_REPLICA="$(random --str 12)" SECRET_POSTGRES_NUVOLARIS="$(random --str 12)"
+      - config SECRET_ETCD_ROOT="$(random --str 12)" SECRET_MILVUS_ROOT="$(random --str 12)" SECRET_MILVUS_S3="$(random --str 12)" SECRET_MILVUS_NUVOLARIS="$(random --str 12)"
+      - config SECRET_NUVOLARIS_METADATA="$(random --str 12)"
+      - config SECRET_SEAWEEDFS_NUVOLARIS="$(random --str 12)"
+      - echo "Generated $(config -d | rg SECRET_ | wc -l) secrets."
+
+  user-secrets:
+    desc: generate user secrets (auth, couchdb, redis, mongodb, minio, postgres)
+    silent: true
+    cmds:
+      - |
+        export USR={{._username_}}
+        config "${USR}_SECRET_OPENWHISK"="$(random --uuid):$(random --str 64)"
+        config "${USR}_SECRET_COUCHDB"="$(random --str 12)"
+        config "${USR}_SECRET_REDIS"="$(random --str 12)"
+        config "${USR}_SECRET_MONGODB"="$(random --str 12)"
+        config "${USR}_SECRET_MINIO"="$(random --str 40)"
+        config "${USR}_SECRET_POSTGRES"="$(random --str 12)"
+        config "${USR}_SECRET_MILVUS"="$(random --str 12)"
+        echo "Generated ${USR} user secrets."
+
+  nosecrets:
+    desc: remove secrets
+    ignore_error: true
+    cmds:
+      - config -r SECRET_OPENWHISK_SYSTEM SECRET_OPENWHISK_NUVOLARIS
+      - config -r SECRET_COUCHDB_ADMIN SECRET_COUCHDB_CONTROLLER  SECRET_COUCHDB_INVOKER
+      - config -r SECRET_REDIS_DEFAULT SECRET_REDIS_NUVOLARIS
+      - config -r SECRET_MONGODB_ADMIN SECRET_MONGODB_NUVOLARIS
+      - config -r SECRET_MINIO_ADMIN SECRET_MINIO_NUVOLARIS
+      - config -r SECRET_POSTGRES_ADMIN SECRET_POSTGRES_REPLICA SECRET_POSTGRES_NUVOLARIS
+      - config -r SECRET_ETCD_ROOT SECRET_MILVUS_ROOT SECRET_MILVUS_S3 SECRET_MILVUS_NUVOLARIS
+      - config -r SECRET_NUVOLARIS_METADATA
+      - config -r SECRET_REGISTRY_PUSH_PULL
+      - config -d | rg SECRET_
+
+  no-user-secrets:
+    desc: remove user secrets
+    silent: true
+    ignore_error: true
+    cmds:
+      - |
+        export USR={{._username_}}
+        config -r "${USR}_SECRET_OPENWHISK"
+        config -r "${USR}_SECRET_COUCHDB"
+        config -r "${USR}_SECRET_REDIS"
+        config -r "${USR}_SECRET_MONGODB"
+        config -r "${USR}_SECRET_MINIO"
+        config -r "${USR}_SECRET_POSTGRES"
+        echo "Removed ${USR} user secrets."
+
+  kubectl:
+    silent: true
+    cmds:
+      - |
+        # no quote here - syntax array generated by docps
+        args={{._args_}}
+        # exanded and assigned to positional parameter
+        set -- ${args[@]}
+        # removing the '--' at the beginning required to pass extra flags
+        test "$1" = "--" && shift
+        # execute the command line as passed and expanded
+        kubectl -n nuvolaris "$@"
+    env:
+      KUBECONFIG:
+        sh: |-
+          if test -e "$OPS_TMP/kubeconfig"
+          then echo "$OPS_TMP/kubeconfig"
+          else echo ~/.kube/config
+          fi
+
+  kubeget:
+    desc: extract informations from
+    silent: true
+    cmds:
+    - kubectl -n nuvolaris get "$OBJECT" -o jsonpath="{$JSONPATH}"
+    env:
+      JSONPATH: '{{._jsonpath_}}'
+      OBJECT: '{{._object_}}'
+      KUBECONFIG:
+        sh: |-
+          if test -e "$OPS_TMP/kubeconfig"
+          then echo "$OPS_TMP/kubeconfig"
+          else echo ~/.kube/config
+          fi
+
+  kubeconfig:
+    silent: true
+    prompt: Are you sure? I am overwriting your ~/.kube/config
+    desc: exporting kubeconfig to ~/.kube/config - WARNING IT OWERWRITES IT
+    cmds:
+      - |
+        if test -e "$OPS_TMP/kubeconfig"
+        then
+          if test -e ~/.kube/config
+          then BKP=~/.kube/config.$(datefmt -f ms)
+               mv ~/.kube/config $(realpath $BKP)
+               BKP="renamed old to $BKP"
+          fi
+          cp "$OPS_TMP/kubeconfig" ~/.kube/config
+          echo exported current kubeconfig to ~/.kube/config
+          echo $BKP
+          kubectl cluster-info
+          kubectl config set-context --current --namespace nuvolaris
+        else echo "No kubeconfig to export"
+        fi
+
+  upload:
+    silent: true
+    cmds:
+      - |
+        ARGS=""
+        if {{.__verbose}}
+        then ARGS="$ARGS --verbose"
+        fi
+        if {{.__clean}}
+        then ARGS="$ARGS --clean"
+        fi
+        if test -n "{{.__batchsize}}"
+        then ARGS="--batchsize={{.__batchsize}}"
+        else ARGS="$ARGS --batchsize=5"
+        fi
+        bun upload.js "$FOLDER_PATH" $ARGS
+    env:
+      FOLDER_PATH:
+        sh: |
+          if test -n "{{._folder_}}"
+          then opspath "{{._folder_}}"
+          else opspath .
+          fi
+
+  clean:
+    silent: true
+    cmds:
+      - |
+        bun upload.js "$FOLDER_PATH" --clean
+    env:
+      FOLDER_PATH:
+        sh: |
+          echo "$OPS_ROOT/util/upload/assets"
+
+  ingress-type:
+    desc: get ingress type
+    silent: true
+    cmds:
+      - |
+        case "$(ops util kubectl -- -o jsonpath='{.items[0].spec.controller}' get ingressclass)" in
+          k8s.io/ingress-nginx)  echo "nginx" ;;
+          traefik.io/ingress-controller) echo "traefik" ;;
+          *) echo "unknown" ;;
+        esac
+
+  edit:
+    desc: edit the current tasks or a plugin
+    silent: true
+    cmds:
+      - code --version >/dev/null || dir "please install VSCode and add the cli 'code' to your PATH"
+      - |
+        DIR="$OPS_ROOT"
+        if test -n "{{._plugin_}}"
+        then DIR="${OPS_HOME}/olaris-{{._plugin_}}"
+             if ! test -d "$DIR"
+             then echo "$DIR"
+                  echo "Plugin {{._plugin_}} not found - install it with ops -plugin <repo>"
+                  exit 1
+             fi
+        fi
+        code "$DIR"
+
+
+  link-plugin:
+    desc: link a plugin
+    silent: true
+    cmds:
+      - |
+        PLUGIN="$OPS_PWD/olaris-{{._plugin_}}"
+        if test -d "$PLUGIN"
+        then
+          ln -s "$PLUGIN" "$OPS_HOME/olaris-{{._plugin_}}"
+          echo "Plugin {{._plugin_}} linked from $PLUGIN to $OPS_HOME/olaris-{{._plugin_}}"
+        else
+          echo "$PLUGIN not found"
+          exit 1
+        fi
+
+  freeze:
+    desc: freeze util
+
+  stdtext:
+    desc: standardize text to the convetion of the platfom
+    silent: true
+    cmds:
+      - bun stdtext.js {{OS}} "{{._text_}}"
 

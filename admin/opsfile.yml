@@ -1,0 +1,191 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+version: "3"
+vars:
+  DRY: ""
+
+env:
+  KUBECONFIG:
+    sh: |
+      if test -e "$OPS_TMP/kubeconfig"
+      then echo  "$OPS_TMP/kubeconfig"
+      else echo ~/.kube/config
+      fi
+
+tasks:
+
+  listuser:
+    silent: true
+    cmds:
+      - |
+        if test -n "{{._username_}}"
+        then 
+          kubectl -n nuvolaris get wsku/{{._username_}} -ojsonpath='{.spec}' | jq .
+        else
+          kubectl -n nuvolaris get wsku 
+        fi
+
+  deleteuser:
+    silent: true
+    cmds:
+      - |
+        {{.DRY}} kubectl -n nuvolaris delete wsku/{{._username_}}
+        {{.DRY}}  $OPS -config -r {{._username_}}
+
+  adduser:
+    silent: true
+    cmds:
+      - |
+        export USERNAME={{._username_}}
+        export EMAIL={{._email_}}
+        export PASSWORD={{._password_}} 
+        export SECRET_USER_AUTH="$($OPS -random -u):$($OPS -random --str 64)"
+
+        # check {{._username_}} is at least 5 chars long
+        if [ ${#USERNAME} -lt 5 ]
+        then 
+          $OPS -die "User name must be at least 5 chars long: $USERNAME"
+        fi
+
+        # check {{._username_}} complies with lower case RFC 1123
+        validate -r '^[a-z0-9](?:[a-z0-9]{0,61}[a-z0-9])?$' $USERNAME "User name must consist of only lower case characters (max 61 chars)"
+
+        # check {{._username_}} is not api or api.*
+        # This cannot happen as the minimum length is 5 chars and the dot would fail the previous check
+        # so we can disable this check
+        # validate -r '^api(\..*)?$' $USERNAME "api and any api.* are reserved names."
+
+        # check that {{.email}} is a valid email
+        validate -m $EMAIL "Invalid email: $EMAIL"
+
+        # check that password is not empty
+        if [ -z "$PASSWORD" ]
+        then die "Password cannot be empty"
+        fi
+
+        # uppercase user to create the secrets in the right format (USERNAME_SECRET_XXX)
+        upperCaseUser=${USERNAME^^}
+
+        $OPS util user-secrets $upperCaseUser
+
+        echo "Creating user ${USERNAME}..."
+
+        export USER_SECRET_REDIS=$($OPS -config "${upperCaseUser}_SECRET_REDIS")
+        export USER_SECRET_POSTGRES=$($OPS -config "${upperCaseUser}_SECRET_POSTGRES")
+        export USER_SECRET_MONGODB=$($OPS -config "${upperCaseUser}_SECRET_MONGODB")
+        export USER_SECRET_MINIO=$($OPS -config "${upperCaseUser}_SECRET_MINIO")
+        export USER_SECRET_MILVUS=$($OPS -config "${upperCaseUser}_SECRET_MILVUS")
+
+        export REDIS_ENABLED=false
+        export MONGODB_ENABLED=false
+        export MINIO_DATA_ENABLED=false
+        export MINIO_STATIC_ENABLED=false
+        export POSTGRES_ENABLED=false
+        export MILVUS_ENABLED=false
+        export MINIO_STORAGE_QUOTA=auto
+
+        if {{.__redis}} || {{.__all}}
+        then 
+          if $OPERATOR_COMPONENT_REDIS
+          then 
+            REDIS_ENABLED=true
+          else 
+            die "Error! Redis is not enabled in OpenServerless"
+          fi
+        fi
+
+        if {{.__mongodb}} || {{.__all}}
+        then 
+          if $OPERATOR_COMPONENT_MONGODB
+          then 
+            MONGODB_ENABLED=true
+          else 
+            die "Error! MongoDB is not enabled in OpenServerless"
+          fi
+        fi
+
+        if {{.__minio}} || {{.__seaweedfs}} || {{.__all}}
+        then 
+          if $OPERATOR_COMPONENT_MINIO || $OPERATOR_COMPONENT_SEAWEEDFS
+          then 
+            MINIO_DATA_ENABLED=true
+            MINIO_STATIC_ENABLED=true
+          else 
+            die "Error! Minio or Seaweedfs are not enabled in OpenServerless"
+          fi
+        fi
+
+
+        if test -n "{{.__storagequota}}"
+        then MINIO_STORAGE_QUOTA={{.__storagequota}}
+        fi         
+
+        if {{.__postgres}} || {{.__all}}
+        then 
+          if $OPERATOR_COMPONENT_POSTGRES
+          then 
+            POSTGRES_ENABLED=true
+          else
+            die "Error! Postgres is not enabled in OpenServerless"
+          fi
+        fi
+
+        if {{.__milvus}} || {{.__all}}
+        then 
+          if $OPERATOR_COMPONENT_MILVUS
+          then 
+            MILVUS_ENABLED=true
+          else
+            die "Error! Milvus is not enabled in OpenServerless"
+          fi
+        fi        
+
+        envsubst -i user-crd.yaml -o _user-crd.yaml
+      - |
+        {{.DRY}} kubectl apply -f _user-crd.yaml  
+
+  compact:
+    silent: true
+    vars:
+      COUCHDB_HOST: couchdb
+      COUCHDB_PORT: "5984"
+      JOB_TTL: "10" # cleanup job after 10 seconds
+      DB_NAME: "nuvolaris_activations"
+    cmds:
+      - |
+        JOB_TTL={{.__ttl}}
+        if test -z $JOB_TTL; then
+          JOB_TTL=10
+        fi
+        export COUCHDB_HOST={{.COUCHDB_HOST}}
+        export COUCHDB_PORT="{{.COUCHDB_PORT}}"
+        export JOB_TTL=$JOB_TTL
+        export DB_NAME={{.DB_NAME}}
+        export COUCHDB_SECRET_NAME=$(kubectl -n nuvolaris get secrets -o name | awk -F'/' '{print $2}' | rg couchdb-auth-)
+        envsubst -i kubernetes/compact-job.yaml -o kubernetes/_compact-job.yaml
+        {{.DRY}} kubectl apply -f kubernetes/_compact-job.yaml
+
+  usage:
+    silent: true
+    cmds:
+      - |
+        if {{.__debug}}; then
+          echo 'flag is {{.__debug}}'
+          FLAG=--debug
+        fi
+        bun usage/usage.js $FLAG

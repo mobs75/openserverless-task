@@ -1,0 +1,372 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+version: '3'
+
+vars:
+  FL: ""
+  API_HOST:
+    sh: |
+      echo "http://localhost:80"
+
+  DEPLOY_CURRENT_HASH:
+    sh: |
+      if test -e "$OPS_ROOT/ide/deploy/bun.lockb"
+      then cd "$OPS_ROOT/ide/deploy" && bun "$OPS_ROOT/ide/deploy/bun.lockb" --hash
+      else echo "0"
+      fi
+
+  DEPLOY_PREVIOUS_HASH:
+    sh: |
+      if test -e "$OPS_ROOT/ide/deploy/hash.lock"
+      then cat "$OPS_ROOT/ide/deploy/hash.lock"
+      else echo "0"
+      fi
+
+tasks:
+
+  prereq:
+    silent: true
+    vars:
+      MSG: |
+            This command on windows requires a devcontainr
+            Please use 'ops ide devcontainer' to create a configuration and enter in a devcontainer.
+            You can then use 'ops ide devel' and 'ops ide deploy'.
+            You can also reopen the project with VSCode and use the command 'Reopen in Container'.
+    cmds:
+      - test {{OS}} != "windows" || die '{{.MSG}}'
+      - test "$(printf '%s\n' "$(bun -v)" "1.1.18" | sort -V | head -n 1)" = "1.1.18" || die "bun 1.1.18 or greater not available"
+      - test -d "$OPS_PWD/packages" || die "no packages in current directory"
+      - test -e ~/.wskprops || die "please run 'ops ide login' first"
+      - test -n "$OPSDEV_HOST" || die "please run 'ops ide login' first"
+      - test "$(ops -wsk property get --namespace | awk '{ print $3 }')" = "$OPSDEV_USERNAME" || die "Repeat the login"
+      - |
+        if ! test -d "$OPS_ROOT/ide/deploy/node_modules" || [ "{{.DEPLOY_CURRENT_HASH}}" != "{{.DEPLOY_PREVIOUS_HASH}}" ]
+          then
+            cd $OPS_ROOT/ide/deploy && bun install && rm -f $OPS_ROOT/ide/deploy/hash.lock && bun $OPS_ROOT/ide/deploy/bun.lockb --hash > $OPS_ROOT/ide/deploy/hash.lock
+        fi
+      - |
+        if test -e "$OPS_PWD/package.json"
+        then if ! test -d "$OPS_PWD/node_modules"
+             then cd $OPS_PWD ; bun install
+             fi
+        fi
+      - task: kill
+
+  devcontainer:
+    silent: true
+    desc: add a devcontainer to your project
+    cmds:
+      - |
+        if test -e "$OPS_PWD/.devcontainer/devcontainer.json"
+        then echo "a .devcontainer already exists"
+        else
+          mkdir -p "$OPS_PWD/.devcontainer"
+          cp devcontainer.json "$OPS_PWD/.devcontainer/"
+          echo "devcontainer created in .devcontainer - please use VSCode and the command 'Reopen in Container'"
+        fi
+      - |
+        if echo "$OPS_PWD/" | rg ' '
+        then die "please place your workspace in a folder WITHOUT SPACES IN THE FOLDER NAME!!!!"
+        fi
+      - bun x @devcontainers/cli up --workspace-folder "$OPS_PWD"
+      - bun x @devcontainers/cli exec --workspace-folder "$OPS_PWD" -- bash
+
+
+  kill:
+    silent: true
+    ignore_errors: true
+    cmds:
+      - |
+        PIDFILE=$(ops -opspath ~/.ops/tmp/deploy.pid)
+        echo $PIDFILE
+        if test -e $PIDFILE
+        then
+          PID=$(cat $PIDFILE)
+
+          if [ ! -z "$PID" ]; then
+            if ps -p "$PID" > /dev/null;
+            then
+              echo "Found previous deploy pid: $PID"
+              kill "$PID"
+              # PGRP=$(ps -o 'pgid=' -p $PID | xargs)
+              # if [ ! -z "$PGRP" ];
+              # then
+              #   echo "Terminating deploy process group $PGRP"
+              #   kill "$PGRP"
+              # else
+              #   echo "Terminating deploy process $PID"
+              #   kill "$PID"
+              # fi
+            fi
+          fi
+          rm -f $PIDFILE
+        fi
+
+  setup:
+    silent: true
+    desc: setup app
+    cmds:
+      - |
+        echo ">>>"
+        ops action list setup | awk 'NR>1{print $1}' | while read action
+        do echo "=== $action"
+           ops invoke "$action" || echo "error in $action"
+        done
+        echo "<<<"
+
+
+  login:
+    silent: true
+    desc: login in you OpenServerless host
+    dotenv:
+      - "{{.OPS_PWD}}/.env.{{.__mode}}"
+      - "{{.OPS_PWD}}/.env"
+    cmds:
+      - echo "{{.OPS_PWD}}/.env"  "{{.OPS_PWD}}/.env.{{.__mode}}"
+      - |
+        if test -n "$OPS_USERNAME"
+        then echo "Please use OPS_USER, OPS_USERNAME is deprecated"
+        fi
+        if test -n "{{._apihost_}}"
+        then export OPSDEV_APIHOST="{{._apihost_}}"
+        fi
+        echo "*** Configuring Access to OpenServerless ***"
+        if test -z "{{._username_}}"
+        then
+            if test -n "$OPS_USER"
+            then
+                export OPSDEV_USERNAME="$OPS_USER"
+            else
+              echo -n "Enter Username: "
+              read OPSDEV_USERNAME
+              export OPSDEV_USERNAME="$(echo $OPSDEV_USERNAME | tr -d '\r')"
+            fi
+        else
+            export OPSDEV_USERNAME="{{._username_}}"
+        fi
+
+        if test -z "{{._apihost_}}"
+        then
+            if test -z "$OPS_APIHOST"
+            then
+                echo -n "Enter Apihost: "
+                read OPSDEV_APIHOST
+                export OPSDEV_APIHOST="$(echo $OPSDEV_APIHOST | tr -d '\r')"
+            else
+                export OPSDEV_APIHOST="$OPS_APIHOST"
+            fi
+        else export OPSDEV_APIHOST="{{._apihost_}}"
+        fi
+        echo "Logging user $OPSDEV_USERNAME in $OPSDEV_APIHOST"
+        if test -n "$OPS_PASSWORD"
+        then export "OPS_PASSWORD"
+        fi
+        # TO FIX: workaround to a problem on ops that ignores the paratemer if OPS_USER is set
+        export OPS_USER="$OPSDEV_USERNAME"
+        export OPS_APIHOST="$OPSDEV_APIHOST"
+        if ops -login
+        then
+          OPSDEV_HOST_PROT="$(echo "$OPSDEV_APIHOST" | awk -F '://' '{print $1}')"
+          OPSDEV_HOST_URL="$(echo "$OPSDEV_APIHOST" | awk -F '://' '{print $2}')"
+          OPSDEV_STREAM="${OPSDEV_APIHOST/\/\////stream.}"
+          OPSDEV_S3="${OPSDEV_APIHOST/\/\////s3.}"
+          OPSDEV_HOST="$OPSDEV_HOST_PROT://$OPSDEV_USERNAME.$OPSDEV_HOST_URL"
+          config OPSDEV_APIHOST="$OPSDEV_APIHOST"
+          config OPSDEV_USERNAME="$OPSDEV_USERNAME"
+          config OPSDEV_HOST="$OPSDEV_HOST"
+          config OPSDEV_S3="$OPSDEV_S3"
+          config OPSDEV_STREAM="$OPSDEV_STREAM"
+          config VITE_OPSDEV_STREAM="$OPSDEV_STREAM"
+          config VITE_OPSDEV_S3="$OPSDEV_S3"
+          config VITE_OPSDEV_HOST="$OPSDEV_HOST"
+          config VITE_OPSDEV_APIHOST="$OPSDEV_APIHOST"
+          source ~/.wskprops
+        fi
+        if {{.__pin}}
+        then
+          touch $OPS_PWD/.env
+          mv $OPS_PWD/.env $OPS_PWD/.env.$$
+          rg -v "AUTH_CHECK=" >$OPS_PWD/.env $OPS_PWD/.env.$$
+          echo "AUTH_CHECK=$AUTH" >>$OPS_PWD/.env
+          rm $OPS_PWD/.env.$$
+        fi
+
+  poll:
+    silent: true
+    desc: poll activation logs
+    cmds:
+      - $OPS activation poll
+
+  serve:
+    silent: true
+    desc: local web server
+    ignore_error: true
+    cmds:
+      - |
+        OPS_UPLOAD_FOLDER=`bun {{.TASKFILE_DIR}}/deploy/info.js upload web`
+        echo "Serving assets from ${OPS_UPLOAD_FOLDER:-web}"
+        bun {{.TASKFILE_DIR}}/deploy/serve.js -h 127.0.0.1 -P $OPSDEV_HOST -d "$OPS_PWD/${OPS_UPLOAD_FOLDER:-web}"
+
+  deploy:
+    silent: true
+    interactive: true
+    desc: deploy a project or a single action (with _action_=<dir-or-file>)
+    dotenv:
+      - "{{.OPS_PWD}}/.env.{{.__mode}}"
+      - "{{.OPS_PWD}}/packages/.env"
+      - "{{.OPS_PWD}}/.env"
+    cmds:
+      - task: prereq
+      - |
+        if test -n "$AUTH_CHECK"
+        then if test "$AUTH_CHECK" != "$AUTH"
+             then echo "WARNING: wrong deploy! You are logged in a different user than your pinned one and configured in .env as AUTH_CHECK" ; exit 1
+             fi
+        fi
+
+        if {{.__dry_run}}
+        then DRY="--dry-run" ; ECHO='echo'
+        else DRY="" ; ECHO=""
+        fi
+
+        if {{.__web}}
+        then deploy_packages=""
+        else deploy_packages="1"
+        fi
+
+        if {{.__packages}}
+        then deploy_web=""
+        else deploy_web="1"
+        fi
+
+        if test -n "{{._action_}}"
+        then
+            bun {{.TASKFILE_DIR}}/deploy/index.js "$OPS_PWD" -s "{{._action_}}" $DRY
+        else
+            if [ -n "$deploy_packages" ]
+            then
+                bun {{.TASKFILE_DIR}}/deploy/index.js "$OPS_PWD" -d $DRY
+            fi
+            if [ -n "$deploy_web" ]
+            then
+              OPS_UPLOAD_FOLDER=`bun {{.TASKFILE_DIR}}/deploy/info.js upload web`
+              echo "UPLOAD ASSETS FROM ${OPS_UPLOAD_FOLDER}"
+              $ECHO $OPS util upload ${OPS_UPLOAD_FOLDER:-web}
+              echo "URL: $OPSDEV_HOST"
+            fi
+        fi
+      - task: setup
+
+
+  undeploy:
+    desc: undeploy actions and packages from the current project
+    silent: true
+    cmds:
+      - task: prereq
+      - |
+        if {{.__dry_run}}
+        then DRY="--dry-run"
+        else DRY=""
+        fi
+        # Check if an action argument is provided
+        if test -n "{{._action_}}"
+        then
+          # Undeploy a specific action
+          echo "Undeploying specific action: {{._action_}}"
+          bun {{.TASKFILE_DIR}}/deploy/index.js "$OPS_PWD" -u -s "{{._action_}}" $DRY
+        else
+          # Undeploy all actions and packages from the current project
+          bun {{.TASKFILE_DIR}}/deploy/index.js "$OPS_PWD" -u $DRY
+        fi
+      - >
+        if {{.__dry_run}}
+          then echo '$' $OPS util clean
+          else $OPS util clean
+        fi
+
+
+  clean:
+    silent: true
+    cmds:
+      - task: kill
+      - |
+        if test -d "$OPS_PWD/packages"
+        then
+           echo "*** removing virtualenv"
+           /bin/rm -rvf "$OPS_PWD"/packages/*/*/virtualenv/
+           echo "*** removing node_modules"
+           /bin/rm -rvf "$OPS_PWD"/packages/*/*/node_modules/
+           echo "*** removing .zip"
+           /bin/rm -vf "$OPS_PWD"/packages/*/*.zip
+        else die "no packages in current directory"
+        fi
+
+  devel:
+    interactive: true
+    silent: true
+    desc: start interactive development mode files
+    dotenv:
+      - "{{.OPS_PWD}}/.env"
+      - "{{.OPS_PWD}}/packages/.env"
+    cmds:
+      - task: prereq
+      - |
+        if test -n "$AUTH_CHECK"
+        then if test "$AUTH_CHECK" != "$AUTH"
+             then echo "WARNING: wrong deploy! You are logged in a different user than your configured AUTH_CHECK" ; exit 1
+             fi
+        fi
+        if {{.__dry_run}}
+        then DRY="--dry-run" ; ECHO='echo'
+        else DRY="" ; ECHO=""
+        fi
+        if {{.__fast}}
+        then FAST="-f"
+        else FAST=""
+        fi
+        if [ -f /proc/version ]; then
+          if rg -i microsoft /proc/version >/dev/null 2>&1; then
+            export WATCHFILES_FORCE_POLLING=1
+          fi
+        # Check for macOS platform
+        elif [ "$(uname)" == "Darwin" ]; then
+          #export WATCHFILES_FORCE_POLLING=1
+        # Check for Windows platform (via WSL or similar)
+        elif [ -n "$WSL_DISTRO_NAME" ]; then
+          # WSL can have /proc/version like Linux
+          if rg -i microsoft /proc/version >/dev/null 2>&1; then
+            export WATCHFILES_FORCE_POLLING=1
+          fi
+        fi
+        bun {{.TASKFILE_DIR}}/deploy/index.js "$OPS_PWD" -w $FAST $DRY
+        true
+
+  shell:
+    desc: open a bash shell with the current environment
+    interactive: true
+    dir: $OPS_PWD
+    cmds:
+      - bash
+
+  python:
+    desc: python subcommand
+
+  nodejs:
+    desc: nodejs subcommand
+
+

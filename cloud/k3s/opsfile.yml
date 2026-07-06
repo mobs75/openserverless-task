@@ -1,0 +1,124 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+version: "3"
+
+vars:
+  # temporary....
+  K3S_VERSION: "v1.27.7-rc1+k3s2"
+  SSH: "ssh -oStrictHostKeyChecking=no"
+  CERTMANAGER: "https://github.com/cert-manager/cert-manager/releases/download/v1.11.0/cert-manager.yaml"
+
+env:
+  KUBECONFIG:
+    sh: |-
+      if test -e "$OPS_TMP/kubeconfig"
+      then echo "$OPS_TMP/kubeconfig"
+      else echo ~/.kube/config
+      fi
+
+tasks:
+  get-cert-manager:
+    cmds:
+      - curl -L "{{.CERTMANAGER}}" >cert-manager.yaml
+
+  install:
+    silent: true
+    #desc: install k3s with ssh in <server> using <user> with sudo
+    vars:
+      INSTALL_USER: '{{._user_ | default "root"}}'
+    cmds:
+      - test -n "{{._server_}}" || die "required <server> ip or hostname"
+      - |
+        traefik_http_nodeport="${K3S_TRAEFIK_HTTP_NODEPORT:-${TRAEFIK_HTTP_NODEPORT:-30080}}"
+        traefik_https_nodeport="${K3S_TRAEFIK_HTTPS_NODEPORT:-${TRAEFIK_HTTPS_NODEPORT:-30081}}"
+        {{.SSH}} '{{.INSTALL_USER}}@{{._server_}}' "sudo mkdir -p /var/lib/rancher/k3s/server/manifests"
+        cat <<EOF | {{.SSH}} '{{.INSTALL_USER}}@{{._server_}}' "sudo tee /var/lib/rancher/k3s/server/manifests/traefik-config.yaml >/dev/null"
+        apiVersion: helm.cattle.io/v1
+        kind: HelmChartConfig
+        metadata:
+          name: traefik
+          namespace: kube-system
+        spec:
+          valuesContent: |-
+            ports:
+              web:
+                nodePort: ${traefik_http_nodeport}
+              websecure:
+                nodePort: ${traefik_https_nodeport}
+        EOF
+      - >
+        k3sup install --k3s-version="{{.K3S_VERSION}}"
+        --host="{{._server_}}" --user="{{.INSTALL_USER}}"
+        --local-path=$OPS_TMP/kubeconfig
+    
+
+  cert-manager:
+    silent: true
+    #desc: install cert-manager
+    cmds:
+      - kubectl --kubeconfig $OPS_TMP/kubeconfig apply -f cert-manager.yaml
+
+  create:
+    silent: true
+    desc: create a k3s with ssh in <server> using <username> with sudo
+    cmds:
+      - config OPERATOR_CONFIG_KUBE=k3s
+      - task: install
+      - task: cert-manager
+      - cp "$OPS_TMP/kubeconfig" "$OPS_TMP/k3s-{{._server_}}.kubeconfig"
+
+  delete:
+    silent: true
+    desc: uninstall with ssh in <server> using <username> with sudo
+    cmds:
+      - test -n "{{._server_}}" || die "please use <server>"
+      - "{{.SSH}} '{{._user_}}@{{._server_}}' sudo /usr/local/bin/k3s-uninstall.sh"
+      - rm "$OPS_TMP/kubeconfig" "$OPS_TMP/k3s-{{._server_}}.kubeconfig"
+    vars:
+      USERNAME: '{{.USERNAME | default "root"}}'
+
+  status:
+    desc: status of the server
+    silent: true
+    cmds:
+      - |
+        if test -e $OPS_TMP/kubeconfig
+        then {{.RUN}} kubectl get nodes
+        else echo "No Cluster Installed"
+        fi
+
+  info:
+    silent: true
+    desc: info on the server
+    cmds:
+      - echo KUBECONFIG="$KUBECONFIG"
+      - echo SERVER_HOST="$SERVER_HOST"
+      - echo SERVER_USERNAME="$SERVER_USERNAME"
+
+  kubeconfig:
+    desc: recover the kubeconfig from a K3S server <server> with user <user>
+    vars:
+      INSTALL_USER: '{{._user_ | default "root"}}'
+    cmds:
+      - test -n "{{._server_}}" || die "please use <server>"
+      - >
+        {{.SSH}} '{{.INSTALL_USER}}@{{._server_}}' 
+        sudo cat /etc/rancher/k3s/k3s.yaml 
+        | replace --stdin -s '127.0.0.1' -r '{{._server_}}'
+        >"$OPS_TMP/kubeconfig"
+      - cp "$OPS_TMP/kubeconfig" "$OPS_TMP/k3s-{{._server_}}.kubeconfig"

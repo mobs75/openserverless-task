@@ -82,6 +82,10 @@ rules:
   resources: ["middlewares"]
   verbs: ["get","patch","list","update","watch","create","delete"]
 
+- apiGroups: ["traefik.io"]
+  resources: ["middlewares"]
+  verbs: ["get","patch","list","update","watch","create","delete"]
+
 # required for kubegres
 - apiGroups: ["kubegres.reactive-tech.io"]
   resources: ["kubegres","kubegres/finalizers","kubegres/status"]
@@ -94,7 +98,12 @@ rules:
 
 - apiGroups: ["ceph.rook.io"]
   resources: ["cephobjectstoreusers"]
-  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]    
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
+# required for etcd #resources: 
+- apiGroups: ["policy"]  
+  resources: ["poddisruptionbudgets"]
+  verbs: ["get","patch","list","update","watch","create","delete"]      
 
 ---
 kind: RoleBinding

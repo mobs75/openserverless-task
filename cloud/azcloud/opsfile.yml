@@ -1,0 +1,266 @@
+# Licensed to the Apache Software Foundation (ASF) under one
+# or more contributor license agreements.  See the NOTICE file
+# distributed with this work for additional information
+# regarding copyright ownership.  The ASF licenses this file
+# to you under the Apache License, Version 2.0 (the
+# "License"); you may not use this file except in compliance
+# with the License.  You may obtain a copy of the License at
+#
+#   http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing,
+# software distributed under the License is distributed on an
+# "AS IS" BASIS, WITHOUT WARRANTIES OR CONDITIONS OF ANY
+# KIND, either express or implied.  See the License for the
+# specific language governing permissions and limitations
+# under the License.
+
+version: "3"
+
+vars:
+  SSH: "ssh -oStrictHostKeyChecking=no"
+
+tasks:
+  prereq:
+    silent: true
+    cmds:
+      - test -n "$AZCLOUD_PROJECT" || die "Please configure AZ Cloud with 'ops config azcloud'"
+      - az --version >/dev/null || die 'You need to install and configure the az CLI tool before running this command.'
+      - config AZCLOUD_PREREQ_OK="true"
+    status:
+      - config AZCLOUD_PREREQ_OK
+
+  res-group:
+    silent: true
+    cmds:
+      - task prereq
+      - >
+        az group show -g "$AZCLOUD_PROJECT" -o none 2>/dev/null ||
+        az group create -l "$AZCLOUD_REGION" -n "$AZCLOUD_PROJECT" --tags ops=true -o none 2>/dev/null
+
+  virtual-network:
+    silent: true
+    cmds:
+      - >
+        az network vnet show -g "$AZCLOUD_PROJECT" -n "$AZCLOUD_PROJECT"-vnet --query "name" -o none 2>/dev/null ||
+        az network vnet create -g "$AZCLOUD_PROJECT" -n "$AZCLOUD_PROJECT"-vnet --tags ops=true -o none 2>/dev/null
+      - >
+        az network vnet subnet show -g "$AZCLOUD_PROJECT" --vnet-name "$AZCLOUD_PROJECT"-vnet -n "$AZCLOUD_PROJECT"-subnet -o none 2>/dev/null ||
+        az network vnet subnet create -g "$AZCLOUD_PROJECT" --vnet-name "$AZCLOUD_PROJECT"-vnet -n "$AZCLOUD_PROJECT"-subnet --address-prefix "10.0.0.0/24" -o none 2>/dev/null
+
+  vm-list:
+    silent: true
+    cmds:
+      - task: prereq
+      - task: res-group
+      - echo "*** Created VM:"
+      - az vm list -g "$AZCLOUD_PROJECT" --query "[?tags.ops=='true'].{name:name, location:location}" --output table
+
+  vm-ip:
+    silent: true
+    cmds:
+      - task: prereq
+      - task: res-group
+      - task: virtual-network
+      - >
+        az network public-ip show -g "$AZCLOUD_PROJECT" -n {{._name_}}-public-ip --output none 2>/dev/null ||
+        az network public-ip create -g "$AZCLOUD_PROJECT" --tags ops=true -n {{._name_}}-public-ip --version IPv4 --sku Standard 
+        --zone 1 2 3 -o none
+      - tr -d '[:space:]' < _vm-ip > _vm-ip.tmp && mv _vm-ip.tmp _vm-ip
+
+  vm-firewall-rule:
+    silent: true
+    cmds:
+      - >
+        az network nsg show -g "$AZCLOUD_PROJECT" --name openserverless-vm-nsg -o none 2>/dev/null ||
+        az network nsg create -g "$AZCLOUD_PROJECT" --tags ops=true --name openserverless-vm-nsg -o none 2>/dev/null
+      - >
+        az network nsg rule show -g "$AZCLOUD_PROJECT" --nsg-name openserverless-vm-nsg
+        -n Allow-Ports-22-80-443-6443-16443 -o none 2>/dev/null ||
+        az network nsg rule create -g "$AZCLOUD_PROJECT" --nsg-name openserverless-vm-nsg
+        --name Allow-Ports-22-80-443-6443-16443 --priority 1000 --direction Inbound
+        --access Allow --protocol Tcp --source-port-ranges '*' --destination-port-ranges 22 80 443 6443 16443
+        --source-address-prefixes '*' --destination-address-prefixes '*'
+        --output none 2>/dev/null
+
+  vm-create:
+    silent: true
+    cmds:
+      - task: prereq
+      - task: res-group
+      - task: virtual-network
+      - task: vm-firewall-rule
+      - task: vm-ip
+      - >
+        cat "$($OPS -opspath $AZCLOUD_SSHKEY)" | awk '/ssh-rsa/{ print "ssh-rsa " $2 }' >_sshkey
+      - >
+        az vm show -g "$AZCLOUD_PROJECT" --name {{._name_}} --query "name" -o none 2>/dev/null ||
+        az vm create -g "$AZCLOUD_PROJECT" --name "{{._name_}}" --location "$AZCLOUD_REGION"
+        --vnet-name "$AZCLOUD_PROJECT"-vnet
+        --subnet "$AZCLOUD_PROJECT"-subnet
+        --public-ip-address {{._name_}}-public-ip
+        --nsg openserverless-vm-nsg        
+        --size "$AZCLOUD_VM"
+        --image "$AZCLOUD_IMAGE"
+        --os-disk-size-gb "$AZCLOUD_DISK"
+        --tags ops=true openserverless-vm=true
+        --ssh-key-values _sshkey
+        --admin-username ubuntu
+        --output none
+      - task: vm-getip
+      - >
+        echo "*** Waiting until the VM is ready..." ;
+        retry -t 1000 -m 1800 {{.SSH}} "ubuntu@$(cat _vm-ip)" hostname
+
+  vm-getip:
+    silent: true
+    cmds:
+      - task: prereq
+      - task: virtual-network
+      - >
+        az network public-ip show -g "$AZCLOUD_PROJECT" -n "{{._name_}}"-public-ip --query ipAddress -o tsv | tr -d '[:space:]' > _vm-ip
+      - cat _vm-ip
+
+
+  vm-resources-id:
+    silent: true
+    cmds:
+      - task: prereq
+      - >
+        az vm show -g "$AZCLOUD_PROJECT" -n "{{._name_}}" --query "name" -o none 2>/dev/null &&
+        az vm show -g "$AZCLOUD_PROJECT" -n "{{._name_}}" --query "storageProfile.osDisk.managedDisk.id" 
+        -o tsv > _vm_disk_id_{{._name_}} || touch _vm_disk_id_{{._name_}}
+      - >
+        az vm show -g "$AZCLOUD_PROJECT" -n "{{._name_}}" --query "name" -o none 2>/dev/null &&
+        az vm show -g "$AZCLOUD_PROJECT" -n "{{._name_}}" --query "networkProfile.networkInterfaces[0].id" 
+        -o tsv > _vm_nic_id_{{._name_}} || touch _vm_nic_id_{{._name_}}
+      - >
+        az vm show -g "$AZCLOUD_PROJECT" -n "{{._name_}}" --query "name" -o none 2>/dev/null &&
+        az network nic show --ids $(cat _vm_nic_id_{{._name_}})  --query "ipConfigurations[0].publicIPAddress.id" 
+        -o tsv > _vm_pubip_id_{{._name_}} || touch _vm_pubip_id_{{._name_}}      
+
+  vm-delete-resources:
+    silent: true
+    cmds:
+      - >
+        if test -s _vm_disk_id_{{._name_}}; then
+          az disk delete --ids $(cat _vm_disk_id_{{._name_}}) --yes --no-wait
+          rm -f _vm_disk_id_{{._name_}}
+        fi
+      - >
+        if test -s _vm_nic_id_{{._name_}}; then
+          az network nic delete --ids $(cat _vm_nic_id_{{._name_}})
+          rm -f _vm_nic_id_{{._name_}}
+        fi
+      - >
+        if test -s _vm_pubip_id_{{._name_}}; then
+          az network public-ip delete --ids $(cat _vm_pubip_id_{{._name_}})
+          rm _vm_pubip_id_{{._name_}}
+        fi
+      
+
+  vm-temp-cleanup:
+    depends: [vm-delete]
+    silent: true
+    cmds:
+      - test -f _vm_nic_id_{{._name_}} && rm -f _vm_nic_id_{{._name_}}; exit 0
+      - test -f _vm_disk_id_{{._name_}} && rm -f _vm_disk_id_{{._name_}}; exit 0
+      - test -f _vm_pubip_id_{{._name_}} && rm -f _vm_pubip_id_{{._name_}}; exit 0
+
+  vm-delete:
+    silent: true
+    depends: [vm-resources-id]
+    cmds:
+      - task: prereq
+      - task: vm-resources-id
+        vars:
+          name: "{{._name_}}"
+      - >
+        az vm show -g "$AZCLOUD_PROJECT" -n "{{._name_}}" --query "name" -o none 2>/dev/null && 
+        az vm delete -y -g "$AZCLOUD_PROJECT" -n "{{._name_}}" || echo "Vm {{._name_}} not found"
+      - task: vm-delete-resources
+        vars:
+          name: "{{._name_}}"
+      - task: vm-temp-cleanup
+        vars:
+          name: "{{._name_}}"
+
+        
+  zone-create:
+    silent: true
+    cmds:
+      - task: prereq
+      - |
+        basedomain=$(echo "{{._zone_}}" | awk -F. '{print $(NF-1)"."$NF}')
+        parent_zone=$(if test "{{._zone_}}" != "$basedomain"; then echo "--parent $basedomain"; else echo ""; fi)
+        az network dns zone create --name "{{._zone_}}" --resource-group "$AZCLOUD_PROJECT" $parent_zone -o none 2>/dev/null || echo "Zone not created"
+      - echo "Zone {{._zone_}} created. Please delegate those name Servers:"
+      - az network dns zone show --name "{{._zone_}}" --resource-group "$AZCLOUD_PROJECT" --query "nameServers" --output tsv
+
+  zone-delete:
+    silent: true
+    cmds:
+      - task: prereq
+      - |
+        az network dns zone list --resource-group "$AZCLOUD_PROJECT" --query "[?name=='{{._zone_}}'].name" --output tsv > _zone-name
+        if [ -s _zone-name ]; then
+        az network dns zone delete --name "$(cat _zone-name)" --resource-group "$AZCLOUD_PROJECT" --yes
+        else
+        echo "Error: zone {{._zone_}} not found"
+        fi
+
+  zone-list:
+    silent: true
+    cmds:
+      - task: prereq
+      - echo "Showing DNS records in resource group $AZCLOUD_PROJECT"
+      - az network dns zone list --resource-group $AZCLOUD_PROJECT --output table
+
+  zone-update:
+    silent: true
+    cmds:
+      - task: prereq
+      - |
+        export DOMAIN="{{._zone_}}"
+        if test -n "{{.__vm}}"
+        then
+        export REC="A"
+        export VAL=$($OPS cloud azcloud vm-getip "{{.__vm}}")
+        elif test -n "{{.__ip}}"
+        then
+        export REC="A"
+        export VAL="{{.__ip}}"
+        elif test -n "{{.__cname}}"
+        then
+        export REC="CNAME"
+        export VAL="{{.__cname}}"
+        fi      
+        if test -n "{{.__host}}"
+        then
+        export HOST="{{.__host}}"
+        elif {{.__wildcard}}
+        then
+        export HOST="*"
+        fi
+        
+        # Print the values for debugging
+        echo "Updating: $DOMAIN $HOST $REC $VAL"
+        
+        # Perform the DNS update in Azure
+        if [ "$REC" = "A" ]; then
+        az network dns record-set a add-record \
+        --zone-name "$DOMAIN" \
+        --resource-group "$AZCLOUD_PROJECT" \
+        --record-set-name "$HOST" \
+        --ipv4-address "$VAL" \
+        --ttl 3600
+        elif [ "$REC" = "CNAME" ]; then
+        az network dns record-set cname set-record \
+        --zone-name "$DOMAIN" \
+        --resource-group "$AZCLOUD_PROJECT" \
+        --record-set-name "$HOST" \
+        --cname "$VAL" \
+        --ttl 3600
+        fi
+
+

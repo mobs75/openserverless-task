@@ -18,6 +18,7 @@
 _*
 !ide/deploy/__main__.py
 .vscode/
+.idea/
 .git-hooks/
 TODO.txt
 **/.env
@@ -25,3 +26,7 @@ TODO.txt
 .task/
 attic.txt
 **/venv/
+node_modules/
+.DS_Store
+ide/deploy/hash.lock
+opsroot.orig
