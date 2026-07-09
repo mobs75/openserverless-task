@@ -59,6 +59,11 @@ rules:
   resources: ["whisks","whisks/status","whisksusers","whisksusers/status","workflows","workflows/status","*/finalizers"]
   verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
 
+# required for spark jobs CRD
+- apiGroups: ["nuvolaris.org"]
+  resources: ["sparkjobs", "sparkjobs/status", "*/finalizers"]
+  verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+
 # networking.k8s.io
 - apiGroups: ["networking.k8s.io"]
   resources: ["ingresses"]
